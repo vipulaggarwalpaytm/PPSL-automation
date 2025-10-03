@@ -1,0 +1,51 @@
+@import "tailwindcss";
+
+:root {
+  /* Paytm-like palette */
+  --color-primary: #00baf2;
+  --color-primary-dark: #00a0d6;
+  --color-navy: #002970;
+  --background: #ffffff;
+  --foreground: #0c1a2a;
+  --muted: #f4f6f8;
+  --border: #e5e8eb;
+}
+
+@theme inline {
+  --color-primary: var(--color-primary);
+  --color-primary-dark: var(--color-primary-dark);
+  --color-navy: var(--color-navy);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-border: var(--border);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0f16;
+    --foreground: #e9eef3;
+    --muted: #0f1722;
+    --border: #1e2937;
+  }
+}
+
+html, body {
+  height: 100%;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+}
+
+.btn-primary {
+  background-color: var(--color-primary);
+  color: white;
+}
+
+.btn-primary:hover {
+  background-color: var(--color-primary-dark);
+}
