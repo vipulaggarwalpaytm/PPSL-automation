@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>RA Team Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/xlsx/dist/xlsx.full.min.js"></script>
+  <style>
+    .card { box-shadow: 0 6px 20px rgba(0,0,0,0.08); border-radius: 14px; }
+    .btn { border-radius: 12px; transition: all 0.3s; }
+    .btn:hover { transform: translateY(-2px); }
+    .spinner {
+      border: 3px solid #f3f3f3;
+      border-top: 3px solid #3b82f6;
+      border-radius: 50%;
+      width: 40px;
+      height: 40px;
+      animation: spin 1s linear infinite;
+    }
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+  </style>
+</head>
+<body class="bg-gradient-to-br from-blue-50 to-cyan-50">
+  <div id="root"></div>
+
+  <script>
+    const { useState, useEffect, Fragment } = React;
+
+    function App() {
+      const [loading, setLoading] = useState(true);
+      const [error, setError] = useState(null);
+      const [userData, setUserData] = useState(null);
+      const [sheetData, setSheetData] = useState({
+        management: [],
+        merchantWise: [],
+        billed: [],
+        unbilled: []
+      });
+      const [debugInfo, setDebugInfo] = useState(null);
+      const [isEditingEnabled, setIsEditingEnabled] = useState(false);
+      const [lastUpdate, setLastUpdate] = useState('');
+      const [activeTab, setActiveTab] = useState('management');
+      const [editableData, setEditableData] = useState({});
+      const [notification, setNotification] = useState(null);
+
+      // Show notification toast
+      const showNotification = (message, type = 'success') => {
+        setNotification({ message, type });
+        setTimeout(() => setNotification(null), 3000);
+      };
+
+      // Load data on mount
+      useEffect(() => {
+        loadData();
+      }, []);
+
+      const loadData = () => {
+        console.log('Loading data...');
+        setLoading(true);
+        setError(null);
+
+        google.script.run
+          .withSuccessHandler((response) => {
+            console.log('Data loaded successfully:', response);
+            
+            if (response.success) {
+              setUserData(response.user);
+              setSheetData(response.data);
+              setIsEditingEnabled(response.editingEnabled);
+              setLastUpdate(response.lastUpdate);
+              setDebugInfo(response.debug);
+              setError(null);
+            } else {
+              setError('Failed to load data');
+            }
+            
+            setLoading(false);
+          })
+          .withFailureHandler((err) => {
+            console.error('Error loading data:', err);
+            setError(err.message || 'Failed to load data. Please check console for details.');
+            setLoading(false);
+          })
+          .getAllDataForEmail('');
+      };
+
+      const handleRefresh = () => {
+        showNotification('Refreshing data...', 'info');
+        loadData();
+      };
+
+      const handleEdit = (id, field, value) => {
+        setEditableData(prev => ({
+          ...prev,
+          [id]: { ...(prev[id] || {}), [field]: value }
+        }));
+      };
+
+      const handleSave = () => {
+        if (!isEditingEnabled) {
+          showNotification('Editing window is closed', 'error');
+          return;
+        }
+
+        if (Object.keys(editableData).length === 0) {
+          showNotification('No changes to save', 'info');
+          return;
+        }
+
+        setLoading(true);
+
+        google.script.run
+          .withSuccessHandler((response) => {
+            if (response.success) {
+              showNotification(`Saved ${response.updated} row(s) successfully!`);
+              
+              // Merge edits into local data
+              setSheetData(prev => ({
+                ...prev,
+                merchantWise: prev.merchantWise.map(row => 
+                  editableData[row.id] ? { ...row, ...editableData[row.id] } : row
+                )
+              }));
+              
+              setEditableData({});
+            } else {
+              showNotification('Save failed', 'error');
+            }
+            setLoading(false);
+          })
+          .withFailureHandler((err) => {
+            showNotification(err.message || 'Save failed', 'error');
+            setLoading(false);
+          })
+          .saveMerchantWiseUpdates('', editableData);
+      };
+
+      const handleDownload = () => {
+        if (!userData) return;
+
+        try {
+          const wb = XLSX.utils.book_new();
+          
+          const sheets = {
+            'Management View': sheetData.management,
+            'Merchant Wise': sheetData.merchantWise,
+            'Billed Details': sheetData.billed,
+            'Unbilled Details': sheetData.unbilled
+          };
+
+          Object.entries(sheets).forEach(([name, data]) => {
+            const exportData = data.map(({ id, _rowIndex, ...rest }) => rest);
+            const ws = XLSX.utils.json_to_sheet(exportData);
+            XLSX.utils.book_append_sheet(wb, ws, name);
+          });
+
+          const filename = `RA_Dashboard_${userData.hod || 'All'}_${new Date().toISOString().slice(0,10)}.xlsx`;
+          XLSX.writeFile(wb, filename);
+          
+          showNotification('Excel file downloaded!');
+        } catch (err) {
+          showNotification('Download failed', 'error');
+          console.error(err);
+        }
+      };
+
+      const renderTable = (dataKey, columns, editable = false) => {
+        const data = sheetData[dataKey] || [];
+
+        if (data.length === 0) {
+          return React.createElement('div', { className: 'text-center py-10' },
+            React.createElement('div', { className: 'text-gray-500 text-lg mb-4' }, 
+              'No data available for your HOD'
+            ),
+            debugInfo && React.createElement('div', { className: 'bg-gray-100 p-4 rounded-lg inline-block text-left text-sm' },
+              React.createElement('div', { className: 'font-semibold mb-2' }, 'Debug Information:'),
+              React.createElement('div', null, `Total rows in sheet: ${debugInfo.totalRows[dataKey] || 0}`),
+              React.createElement('div', null, `Filtered rows: ${debugInfo.filteredRows[dataKey] || 0}`),
+              React.createElement('div', { className: 'mt-2 text-xs text-gray-600' },
+                'If you see 0 filtered rows but the sheet has data, check that your HOD value matches the data in the sheet.'
+              )
+            )
+          );
+        }
+
+        return React.createElement('div', { className: 'overflow-x-auto' },
+          React.createElement('table', { className: 'w-full bg-white' },
+            React.createElement('thead', { className: 'bg-gradient-to-r from-blue-600 to-cyan-500 text-white' },
+              React.createElement('tr', null,
+                columns.map((col, i) =>
+                  React.createElement('th', {
+                    key: i,
+                    className: 'px-4 py-3 text-left text-sm font-semibold'
+                  }, col.label)
+                )
+              )
+            ),
+            React.createElement('tbody', null,
+              data.map((row, rowIdx) =>
+                React.createElement('tr', {
+                  key: row.id,
+                  className: `border-b ${rowIdx % 2 === 0 ? 'bg-gray-50' : 'bg-white'} hover:bg-blue-50`
+                },
+                  columns.map((col, colIdx) =>
+                    React.createElement('td', {
+                      key: colIdx,
+                      className: 'px-4 py-3 text-sm text-gray-700'
+                    },
+                      (editable && (col.key === 'expectedDate' || col.key === 'remarks'))
+                        ? React.createElement('input', {
+                            type: col.key === 'expectedDate' ? 'date' : 'text',
+                            value: (editableData[row.id]?.[col.key]) ?? (row[col.key] || ''),
+                            onChange: (e) => handleEdit(row.id, col.key, e.target.value),
+                            disabled: !isEditingEnabled,
+                            className: 'w-full px-2 py-1 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100',
+                            placeholder: col.key === 'expectedDate' ? 'Select date' : 'Enter remarks'
+                          })
+                        : String(row[col.key] || '')
+                    )
+                  )
+                )
+              )
+            )
+          )
+        );
+      };
+
+      // Loading state
+      if (loading && !userData) {
+        return React.createElement('div', { className: 'min-h-screen flex items-center justify-center' },
+          React.createElement('div', { className: 'text-center' },
+            React.createElement('div', { className: 'spinner mx-auto mb-4' }),
+            React.createElement('div', { className: 'text-blue-700 text-xl' }, 'Loading dashboard...')
+          )
+        );
+      }
+
+      // Error state
+      if (error && !userData) {
+        return React.createElement('div', { className: 'min-h-screen flex items-center justify-center p-6' },
+          React.createElement('div', { className: 'card bg-white p-8 max-w-lg' },
+            React.createElement('div', { className: 'text-red-600 text-xl font-bold mb-4' }, '⚠ Error Loading Dashboard'),
+            React.createElement('div', { className: 'text-gray-700 mb-4' }, error),
+            React.createElement('button', {
+              onClick: loadData,
+              className: 'btn bg-blue-600 text-white px-6 py-2 font-semibold hover:bg-blue-700'
+            }, 'Retry')
+          )
+        );
+      }
+
+      // Main dashboard
+      return React.createElement('div', { className: 'min-h-screen' },
+        
+        // Header
+        React.createElement('div', { className: 'bg-gradient-to-r from-blue-600 to-cyan-500 text-white shadow-lg' },
+          React.createElement('div', { className: 'container mx-auto px-6 py-5' },
+            React.createElement('div', { className: 'flex items-center justify-between flex-wrap gap-4' },
+              React.createElement('div', null,
+                React.createElement('h1', { className: 'text-3xl font-bold' }, 'RA Team Dashboard'),
+                userData && React.createElement('div', { className: 'text-blue-100 text-sm mt-1' },
+                  `${userData.name} (${userData.email}) | HOD: ${userData.hod || 'None'} | Role: ${userData.role}`
+                )
+              ),
+              React.createElement('div', { className: 'flex gap-3' },
+                React.createElement('button', {
+                  onClick: handleRefresh,
+                  className: 'btn bg-white text-blue-600 px-4 py-2 font-semibold shadow'
+                }, 'Refresh Data'),
+                React.createElement('button', {
+                  onClick: handleDownload,
+                  className: 'btn bg-cyan-600 text-white px-4 py-2 font-semibold shadow'
+                }, 'Download Excel')
+              )
+            )
+          )
+        ),
+
+        // Notification toast
+        notification && React.createElement('div', {
+          className: `fixed top-20 right-6 z-50 px-4 py-3 rounded-lg shadow-lg ${
+            notification.type === 'success' ? 'bg-green-500' :
+            notification.type === 'error' ? 'bg-red-500' : 'bg-blue-500'
+          } text-white`
+        }, notification.message),
+
+        // Info banner
+        React.createElement('div', { className: 'container mx-auto px-6 py-4' },
+          React.createElement('div', { className: 'bg-blue-100 border-l-4 border-blue-600 p-4 rounded-lg' },
+            React.createElement('div', { className: 'text-sm text-blue-800 flex gap-6 flex-wrap' },
+              React.createElement('span', null, `Last Updated: ${lastUpdate}`),
+              React.createElement('span', null, `Editing: ${isEditingEnabled ? '✓ Enabled' : '✗ Disabled'}`)
+            )
+          )
+        ),
+
+        // Tabs
+        React.createElement('div', { className: 'container mx-auto px-6 py-2' },
+          React.createElement('div', { className: 'bg-white card p-1 inline-flex gap-2 flex-wrap' },
+            [
+              { key: 'management', label: 'Management View' },
+              { key: 'merchantWise', label: 'Merchant Wise' },
+              { key: 'billed', label: 'Billed Details' },
+              { key: 'unbilled', label: 'Unbilled Details' }
+            ].map(tab =>
+              React.createElement('button', {
+                key: tab.key,
+                onClick: () => setActiveTab(tab.key),
+                className: `px-6 py-2 font-semibold btn ${
+                  activeTab === tab.key
+                    ? 'bg-gradient-to-r from-blue-600 to-cyan-500 text-white shadow'
+                    : 'text-gray-700 hover:bg-gray-100'
+                }`
+              }, tab.label)
+            )
+          )
+        ),
+
+        // Content
+        React.createElement('div', { className: 'container mx-auto px-6 py-6' },
+          React.createElement('div', { className: 'card bg-white p-6' },
+            
+            activeTab === 'management' && renderTable('management', [
+              { key: 'merchant', label: 'Merchant Name' },
+              { key: 'status', label: 'Status' },
+              { key: 'revenue', label: 'Revenue (₹)' },
+              { key: 'date', label: 'Date' }
+            ]),
+
+            activeTab === 'merchantWise' && React.createElement(Fragment, null,
+              renderTable('merchantWise', [
+                { key: 'merchant', label: 'Merchant Name' },
+                { key: 'amount', label: 'Amount (₹)' },
+                { key: 'status', label: 'Status' },
+                { key: 'expectedDate', label: 'Expected Date' },
+                { key: 'remarks', label: 'Remarks' }
+              ], true),
+              Object.keys(editableData).length > 0 && React.createElement('div', { className: 'mt-4 flex justify-end' },
+                React.createElement('button', {
+                  onClick: handleSave,
+                  disabled: !isEditingEnabled,
+                  className: 'btn bg-gradient-to-r from-blue-600 to-cyan-500 text-white px-6 py-2 font-semibold shadow disabled:opacity-50'
+                }, 'Save Changes')
+              )
+            ),
+
+            activeTab === 'billed' && renderTable('billed', [
+              { key: 'merchant', label: 'Merchant Name' },
+              { key: 'invoice', label: 'Invoice Number' },
+              { key: 'amount', label: 'Amount (₹)' },
+              { key: 'date', label: 'Date' }
+            ]),
+
+            activeTab === 'unbilled' && renderTable('unbilled', [
+              { key: 'merchant', label: 'Merchant Name' },
+              { key: 'amount', label: 'Amount (₹)' },
+              { key: 'pending', label: 'Pending On' },
+              { key: 'days', label: 'Days Pending' }
+            ])
+          )
+        ),
+
+        // Footer
+        React.createElement('div', { className: 'container mx-auto px-6 py-6 text-center text-gray-600 text-sm' },
+          React.createElement('p', null, `© ${new Date().getFullYear()} RA Team Dashboard | ${userData ? `Showing data for ${userData.hod || 'ALL'}` : ''}`)
+        )
+      );
+    }
+
+    // Render app
+    ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));
+  </script>
+</body>
+</html>
