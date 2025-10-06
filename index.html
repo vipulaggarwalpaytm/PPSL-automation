@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>RA Team Dashboard</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- Tailwind -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- React UMD -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <!-- SheetJS -->
+    <script src="https://unpkg.com/xlsx/dist/xlsx.full.min.js"></script>
+    <style>
+      /* subtle shadow + rounded aesthetic matching paytm.com vibe */
+      .card { box-shadow: 0 6px 20px rgba(0,0,0,0.08); border-radius: 14px; }
+      .pill { border-radius: 12px; }
+      .btn { border-radius: 12px; }
+    </style>
+  </head>
+
+  <body class="bg-gradient-to-br from-blue-50 to-cyan-50">
+    <div id="root"></div>
+
+    <script>
+      const { useState, useEffect } = React;
+
+      function RADashboard() {
+        const [loading, setLoading] = useState(true);
+        const [userData, setUserData] = useState(null);
+        const [sheetData, setSheetData] = useState({ management: [], merchantWise: [], billed: [], unbilled: [] });
+        const [isEditingEnabled, setIsEditingEnabled] = useState(false);
+        const [lastUpdate, setLastUpdate] = useState('');
+        const [notification, setNotification] = useState(null);
+        const [activeTab, setActiveTab] = useState('management');
+        const [editableData, setEditableData] = useState({});
+        const [debugInfo, setDebugInfo] = useState(null);
+
+        const showToast = (message, type = 'success') => {
+          setNotification({ message, type });
+          setTimeout(() => setNotification(null), 3200);
+        };
+
+        // Auto-detect user on load (backend resolves Session email)
+        useEffect(() => {
+          google.script.run
+            .withSuccessHandler((res) => {
+              console.log('Data loaded:', res);
+              setUserData(res.user);
+              setSheetData(res.data);
+              setIsEditingEnabled(res.editingEnabled);
+              setLastUpdate(res.lastUpdate);
+              setDebugInfo(res.debug);
+              setLoading(false);
+            })
+            .withFailureHandler((err) => {
+              console.error('Error loading data:', err);
+              setLoading(false);
+              setNotification({ message: err && err.message ? err.message : 'Failed to load', type: 'error' });
+            })
+            .getAllDataForEmail('');
+        }, []);
+
+        const getRows = (key) => sheetData[key] || [];
+
+        const handleEdit = (id, field, value) => {
+          setEditableData(prev => ({
+            ...prev,
+            [id]: { ...(prev[id] || {}), [field]: value }
+          }));
+        };
+
+        const handleSave = () => {
+          if (!isEditingEnabled) { showToast('Editing window is closed.', 'error'); return; }
+          setLoading(true);
+          google.script.run
+            .withSuccessHandler((res) => {
+              // merge into local data
+              setSheetData(prev => ({
+                ...prev,
+                merchantWise: prev.merchantWise.map(r => editableData[r.id] ? { ...r, ...editableData[r.id] } : r)
+              }));
+              setEditableData({});
+              setLoading(false);
+              showToast(`Saved ${res.updated} row(s).`);
+            })
+            .withFailureHandler((err) => {
+              setLoading(false);
+              showToast(err && err.message ? err.message : 'Failed to save', 'error');
+            })
+            .saveMerchantWiseUpdates('', editableData); // backend uses Session email
+        };
+
+        const handleRefresh = () => {
+          setLoading(true);
+          google.script.run
+            .withSuccessHandler((ts) => {
+              setLastUpdate(ts.lastUpdate);
+              // re-pull data to reflect latest publish
+              google.script.run
+                .withSuccessHandler((res) => {
+                  console.log('Refreshed data:', res);
+                  setUserData(res.user);
+                  setSheetData(res.data);
+                  setIsEditingEnabled(res.editingEnabled);
+                  setLastUpdate(res.lastUpdate);
+                  setDebugInfo(res.debug);
+                  setLoading(false);
+                  showToast('Data refreshed successfully!');
+                })
+                .withFailureHandler((err) => {
+                  setLoading(false);
+                  showToast('Refresh failed', 'error');
+                })
+                .getAllDataForEmail('');
+            })
+            .withFailureHandler(() => setLoading(false))
+            .refreshNow();
+        };
+
+        const handleDownload = () => {
+          if (!userData) return;
+          const wb = XLSX.utils.book_new();
+          const tabs = {
+            'Management View': 'management',
+            'Merchant_wise_Final': 'merchantWise',
+            'Billed Detailed': 'billed',
+            'Unbilled Detailed': 'unbilled'
+          };
+          Object.entries(tabs).forEach(([sheetName, key]) => {
+            const exportRows = getRows(key).map(({ id, _rowIndex, HOD, ...rest }) => rest);
+            const ws = XLSX.utils.json_to_sheet(exportRows);
+            XLSX.utils.book_append_sheet(wb, ws, sheetName);
+          });
+          const file = `RA_Report_${(userData.hod || 'ALL').replace(/\s+/g,'_')}_${new Date().toISOString().slice(0,10)}.xlsx`;
+          XLSX.writeFile(wb, file);
+          showToast('Excel file downloaded!');
+        };
+
+        const renderTable = (key, columns, editable=false) => {
+          const data = getRows(key);
+          if (!data.length) {
+            return (
+              React.createElement('div', { className: 'card bg-white p-10 text-center' },
+                React.createElement('div', { className: 'text-lg text-gray-500 mb-4' }, 'No data available for your HOD'),
+                debugInfo && React.createElement('div', { className: 'mt-4 p-4 bg-gray-100 rounded text-left text-sm text-gray-700' },
+                  React.createElement('div', { className: 'font-semibold mb-2' }, 'Debug Information:'),
+                  React.createElement('div', null, `Total rows in sheet: ${debugInfo.totalRows[key] || 0}`),
+                  React.createElement('div', null, `Rows matching your HOD: ${debugInfo.filteredRows[key] || 0}`),
+                  React.createElement('div', { className: 'mt-2 text-xs' }, 'Check the Apps Script logs (Extensions → Apps Script → Execution log) for detailed information about HOD matching.')
+                )
+              )
+            );
+          }
+          return (
+            React.createElement('div', { className: 'overflow-x-auto' },
+              React.createElement('table', { className: 'w-full bg-white card overflow-hidden' },
+                React.createElement('thead', { className: 'bg-gradient-to-r from-blue-600 to-cyan-500 text-white' },
+                  React.createElement('tr', null,
+                    columns.map((c,i) =>
+                      React.createElement('th', { key: i, className: 'px-4 py-3 text-left text-sm font-semibold' }, c.label)
+                    )
+                  )
+                ),
+                React.createElement('tbody', null,
+                  data.map((row, rIdx) =>
+                    React.createElement('tr', {
+                      key: row.id,
+                      className: `border-b border-gray-100 ${rIdx%2===0?'bg-gray-50':'bg-white'} hover:bg-blue-50`
+                    },
+                      columns.map((c, ci) =>
+                        React.createElement('td', { key: ci, className: 'px-4 py-3 text-sm text-gray-700' },
+                          (editable && (c.key === 'expectedDate' || c.key === 'remarks'))
+                            ? React.createElement('input', {
+                                type: c.key === 'expectedDate' ? 'date' : 'text',
+                                value: (editableData[row.id]?.[c.key]) ?? (row[c.key] ?? ''),
+                                onChange: (e) => handleEdit(row.id, c.key, e.target.value),
+                                disabled: !isEditingEnabled,
+                                className: 'w-full px-2 py-1 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100',
+                                placeholder: c.key === 'expectedDate' ? 'Select date' : 'Enter remarks'
+                              })
+                            : React.createElement('span', null, row[c.key])
+                        )
+                      )
+                    )
+                  )
+                )
+              )
+            )
+          );
+        };
+
+        if (loading) {
+          return (
+            React.createElement('div', { className: 'min-h-screen flex items-center justify-center text-blue-700' },
+              React.createElement('div', { className: 'animate-pulse text-xl' }, 'Loading…')
+            )
+          );
+        }
+
+        return (
+          React.createElement('div', { className: 'min-h-screen' },
+
+            /* Header */
+            React.createElement('div', { className: 'bg-gradient-to-r from-blue-600 to-cyan-500 text-white' },
+              React.createElement('div', { className: 'container mx-auto px-6 py-5 flex items-center justify-between flex-wrap gap-4' },
+                React.createElement('div', null,
+                  React.createElement('div', { className: 'text-3xl font-bold' }, 'RA Team Dashboard'),
+                  React.createElement('div', { className: 'text-blue-100 text-sm mt-1' },
+                    `${userData.name} (${userData.email}) | HOD: ${userData.hod || 'ALL'} | Role: ${userData.role}`
+                  )
+                ),
+                React.createElement('div', { className: 'flex gap-3 flex-wrap' },
+                  React.createElement('button', { onClick: handleRefresh, className: 'btn bg-white text-blue-600 px-4 py-2 font-semibold hover:bg-blue-50 shadow' }, 'Refresh Data'),
+                  React.createElement('button', { onClick: handleDownload, className: 'btn bg-cyan-600 text-white px-4 py-2 font-semibold hover:bg-cyan-700 shadow' }, 'Download Excel')
+                )
+              )
+            ),
+
+            /* Notification */
+            notification && React.createElement('div', {
+              className: `fixed top-20 right-6 z-50 px-4 py-3 rounded-lg shadow-lg ${notification.type === 'success' ? 'bg-green-500' : 'bg-red-500'} text-white`
+            }, notification.message),
+
+            /* Info banner */
+            React.createElement('div', { className: 'container mx-auto px-6 py-4' },
+              React.createElement('div', { className: 'bg-blue-100 border-l-4 border-blue-600 p-4 rounded-lg' },
+                React.createElement('div', { className: 'text-sm text-blue-800 flex gap-6 flex-wrap' },
+                  React.createElement('span', null, `Last Updated: ${lastUpdate}`),
+                  React.createElement('span', null, `Editing Status: ${isEditingEnabled ? 'Enabled (within window)' : 'Disabled'}`)
+                )
+              )
+            ),
+
+            /* Tabs */
+            React.createElement('div', { className: 'container mx-auto px-6 py-2' },
+              React.createElement('div', { className: 'bg-white card p-1 inline-flex gap-2 flex-wrap' },
+                [
+                  { key: 'management', label: 'Management View' },
+                  { key: 'merchantWise', label: 'Merchant Wise' },
+                  { key: 'billed', label: 'Billed Details' },
+                  { key: 'unbilled', label: 'Unbilled Details' }
+                ].map(tab =>
+                  React.createElement('button', {
+                    key: tab.key,
+                    onClick: () => setActiveTab(tab.key),
+                    className: `px-6 py-2 font-semibold btn ${activeTab === tab.key ? 'bg-gradient-to-r from-blue-600 to-cyan-500 text-white shadow' : 'text-gray-700 hover:bg-gray-100'}`
+                  }, tab.label)
+                )
+              )
+            ),
+
+            /* Content */
+            React.createElement('div', { className: 'container mx-auto px-6 py-6' },
+              React.createElement('div', { className: 'bg-white card p-6' },
+                activeTab === 'management' && renderTable('management', [
+                  { key: 'merchant', label: 'Merchant Name' },
+                  { key: 'status',   label: 'Status' },
+                  { key: 'revenue',  label: 'Revenue (₹)' },
+                  { key: 'date',     label: 'Date' }
+                ], false),
+
+                activeTab === 'merchantWise' && React.createElement(React.Fragment, null,
+                  renderTable('merchantWise', [
+                    { key: 'merchant',     label: 'Merchant Name' },
+                    { key: 'amount',       label: 'Amount (₹)' },
+                    { key: 'status',       label: 'Status' },
+                    { key: 'expectedDate', label: 'Expected Date' },
+                    { key: 'remarks',      label: 'Remarks' }
+                  ], true),
+                  Object.keys(editableData).length > 0 && React.createElement('div', { className: 'mt-4 flex justify-end' },
+                    React.createElement('button', {
+                      onClick: handleSave,
+                      className: 'btn bg-gradient-to-r from-blue-600 to-cyan-500 text-white px-6 py-2 font-semibold hover:shadow-lg'
+                    }, 'Save Changes')
+                  )
+                ),
+
+                activeTab === 'billed' && renderTable('billed', [
+                  { key: 'merchant', label: 'Merchant Name' },
+                  { key: 'invoice',  label: 'Invoice Number' },
+                  { key: 'amount',   label: 'Amount (₹)' },
+                  { key: 'date',     label: 'Date' }
+                ], false),
+
+                activeTab === 'unbilled' && renderTable('unbilled', [
+                  { key: 'merchant', label: 'Merchant Name' },
+                  { key: 'amount',   label: 'Amount (₹)' },
+                  { key: 'pending',  label: 'Pending On' },
+                  { key: 'days',     label: 'Days Pending' }
+                ], false)
+              )
+            ),
+
+            /* Footer */
+            React.createElement('div', { className: 'container mx-auto px-6 py-6 text-center text-gray-600 text-sm' },
+              React.createElement('p', null, `© ${new Date().getFullYear()} RA Team Dashboard | Showing data for ${userData.hod || 'ALL'}`)
+            )
+          )
+        );
+      }
+
+      ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(RADashboard));
+    </script>
+  </body>
+</html>
