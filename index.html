@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>RA Team Dashboard</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- Tailwind -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- React UMD -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <!-- SheetJS -->
+    <script src="https://unpkg.com/xlsx/dist/xlsx.full.min.js"></script>
+
+    <style>
+      /* Paytm-like soft cards & rounded controls */
+      .card { box-shadow: 0 6px 20px rgba(0,0,0,0.08); border-radius: 14px; }
+      .btn  { border-radius: 12px; }
+      .pill { border-radius: 9999px; }
+      .chip { padding: 2px 10px; border-radius: 9999px; font-size: 12px; }
+    </style>
+  </head>
+
+  <body class="bg-gradient-to-br from-blue-50 to-cyan-50">
+    <div id="root"></div>
+
+    <script>
+      // Minimal on-page error overlay so the app never fails silently
+      (function attachErrorOverlay() {
+        function show(msg) {
+          console.error('ERROR:', msg);
+          var bar = document.createElement('div');
+          bar.className = 'fixed top-2 left-2 right-2 z-[9999] bg-red-600 text-white p-3 rounded-md shadow';
+          bar.textContent = 'Error: ' + msg;
+          document.body.appendChild(bar);
+          setTimeout(() => bar.remove(), 8000);
+        }
+        window.addEventListener('error', e => show(e.message || String(e.error || e)));
+        window.addEventListener('unhandledrejection', e => show((e.reason && (e.reason.message || e.reason)) || 'Unhandled promise rejection'));
+      })();
+    </script>
+
+    <script>
+      const { useState, useEffect, Fragment } = React;
+
+      function RADashboard() {
+        const [loading, setLoading] = useState(true);
+        const [notice, setNotice] = useState(null); // {message, type}
+        const [errorNote, setErrorNote] = useState('');
+        const [user, setUser] = useState({ email:'', name:'', hod:'', role:'', active:false });
+
+        // Data: arrays of row objects (id + ALL columns as keys)
+        const [data, setData] = useState({
+          management: [],
+          merchantWise: [],
+          billed: [],
+          unbilled: []
+        });
+
+        // Meta: header arrays (original order), editable keys for merchant, HOD headers, and sheetsFound debug
+        const [meta, setMeta] = useState({
+          managementHeaders: [],
+          merchantHeaders: [],
+          billedHeaders: [],
+          unbilledHeaders: [],
+          merchantExpectedKey: '',
+          merchantRemarksKey: '',
+          hodHeaders: {},
+          sheetsFound: {},
+          debug: {}
+        });
+
+        const [isEditingEnabled, setIsEditingEnabled] = useState(false);
+        const [lastUpdate, setLastUpdate] = useState('');
+        const [activeTab, setActiveTab] = useState('management');
+        const [editable, setEditable] = useState({}); // { [rowId]: { expectedDate, remarks } }
+        const [showDebug, setShowDebug] = useState(true); // Show debug panel by default
+
+        const toast = (message, type='success') => {
+          setNotice({ message, type });
+          setTimeout(() => setNotice(null), 3200);
+        };
+
+        useEffect(() => {
+          if (!(window.google && google.script && google.script.run)) {
+            setLoading(false);
+            setErrorNote('google.script.run is not available. Please deploy as a Google Apps Script Web App.');
+            return;
+          }
+
+          console.log('Fetching data from backend...');
+          google.script.run
+            .withSuccessHandler((res) => {
+              console.log('Backend response:', res);
+              if (!res) { setLoading(false); setErrorNote('Empty response from backend'); return; }
+
+              if (res.error) {
+                console.error('Backend error:', res.message);
+                setErrorNote(res.message || 'Backend error');
+              }
+
+              setUser(res.user || {});
+              setData(res.data || { management:[], merchantWise:[], billed:[], unbilled:[] });
+              setMeta(res.meta || {
+                managementHeaders: [], merchantHeaders: [], billedHeaders: [], unbilledHeaders: [],
+                merchantExpectedKey:'', merchantRemarksKey:'', hodHeaders:{}, sheetsFound:{}, debug:{}
+              });
+              setIsEditingEnabled(!!res.editingEnabled);
+              setLastUpdate(res.lastUpdate || '');
+              setLoading(false);
+
+              // Log data counts for debugging
+              console.log('Data loaded:', {
+                management: res.data?.management?.length || 0,
+                merchantWise: res.data?.merchantWise?.length || 0,
+                billed: res.data?.billed?.length || 0,
+                unbilled: res.data?.unbilled?.length || 0
+              });
+            })
+            .withFailureHandler((err) => {
+              console.error('Backend call failed:', err);
+              setLoading(false);
+              setErrorNote((err && err.message) ? err.message : 'Failed to load');
+            })
+            .getAllDataForEmail('');
+        }, []);
+
+        /* Helpers */
+        const headersFor = (key) => {
+          switch (key) {
+            case 'management':  return meta.managementHeaders || [];
+            case 'merchantWise':return meta.merchantHeaders || [];
+            case 'billed':      return meta.billedHeaders || [];
+            case 'unbilled':    return meta.unbilledHeaders || [];
+            default: return [];
+          }
+        };
+        const rowsFor = (key) => data[key] || [];
+
+        // If backend somehow didn't send headers, infer from row keys (fallback)
+        const headersOrInfer = (key) => {
+          const h = headersFor(key);
+          if (h && h.length) return h;
+          const rows = rowsFor(key);
+          if (!rows.length) return [];
+          const first = rows[0];
+          return Object.keys(first).filter(k => !['id', '_rowIndex', 'expectedDate', 'remarks'].includes(k));
+        };
+
+        const onEdit = (rowId, field, value) => {
+          setEditable(prev => ({ ...prev, [rowId]: { ...(prev[rowId] || {}), [field]: value } }));
+        };
+
+        const saveEdits = () => {
+          if (!isEditingEnabled) { toast('Editing window is closed.', 'error'); return; }
+          if (!Object.keys(editable).length) { toast('No changes to save.', 'error'); return; }
+          setLoading(true);
+          console.log('Saving edits:', editable);
+          google.script.run
+            .withSuccessHandler((res) => {
+              console.log('Save response:', res);
+              if (res && res.error) {
+                setLoading(false);
+                toast(res.message || 'Save failed', 'error');
+                return;
+              }
+              // merge back into local list
+              setData(prev => ({
+                ...prev,
+                merchantWise: (prev.merchantWise || []).map(r => {
+                  const p = editable[r.id];
+                  if (!p) return r;
+                  const out = { ...r };
+                  if (typeof p.expectedDate !== 'undefined') out.expectedDate = p.expectedDate;
+                  if (typeof p.remarks      !== 'undefined') out.remarks = p.remarks;
+                  return out;
+                })
+              }));
+              setEditable({});
+              setLoading(false);
+              toast(`Saved ${res.updated || 0} row(s).`);
+            })
+            .withFailureHandler((err) => {
+              console.error('Save failed:', err);
+              setLoading(false);
+              toast((err && err.message) ? err.message : 'Save failed', 'error');
+            })
+            .saveMerchantWiseUpdates('', editable);
+        };
+
+        const refresh = () => {
+          setLoading(true);
+          console.log('Refreshing data...');
+          google.script.run
+            .withSuccessHandler(() => {
+              google.script.run
+                .withSuccessHandler((res) => {
+                  console.log('Refresh response:', res);
+                  if (res && res.error) setErrorNote(res.message || 'Backend error');
+                  setUser(res.user || {});
+                  setData(res.data || { management:[], merchantWise:[], billed:[], unbilled:[] });
+                  setMeta(res.meta || {
+                    managementHeaders: [], merchantHeaders: [], billedHeaders: [], unbilledHeaders: [],
+                    merchantExpectedKey:'', merchantRemarksKey:'', hodHeaders:{}, sheetsFound:{}, debug:{}
+                  });
+                  setIsEditingEnabled(!!res.editingEnabled);
+                  setLastUpdate(res.lastUpdate || '');
+                  setLoading(false);
+                  toast('Data refreshed!');
+                })
+                .withFailureHandler((err) => { 
+                  console.error('Refresh failed:', err);
+                  setLoading(false); 
+                  toast('Refresh failed', 'error'); 
+                })
+                .getAllDataForEmail('');
+            })
+            .withFailureHandler(() => setLoading(false))
+            .refreshNow();
+        };
+
+        const downloadVisible = () => {
+          const wb = XLSX.utils.book_new();
+          const map = {
+            'Management View': 'management',
+            'Merchant_wise_Final': 'merchantWise',
+            'Billed Detailed': 'billed',
+            'Unbilled Detailed': 'unbilled'
+          };
+          Object.entries(map).forEach(([sheetName, key]) => {
+            const headers = headersOrInfer(key);
+            const rows = rowsFor(key);
+            const out = rows.map(r => {
+              const o = {};
+              headers.forEach(h => { o[h || ''] = (r[h] != null ? r[h] : ''); });
+              return o;
+            });
+            const ws = XLSX.utils.json_to_sheet(out, { header: headers });
+            XLSX.utils.book_append_sheet(wb, ws, sheetName);
+          });
+          const file = `RA_Report_${(user.hod || 'ALL').replace(/\s+/g,'_')}_${new Date().toISOString().slice(0,10)}.xlsx`;
+          XLSX.writeFile(wb, file);
+          toast('Excel downloaded!');
+        };
+
+        const renderTable = (key, allowMerchantEdit=false) => {
+          const headers = headersOrInfer(key);
+          const rows = rowsFor(key);
+          const expectedKey = key === 'merchantWise' ? (meta.merchantExpectedKey || '') : '';
+          const remarksKey  = key === 'merchantWise' ? (meta.merchantRemarksKey  || '') : '';
+
+          console.log(`Rendering ${key}:`, { headerCount: headers.length, rowCount: rows.length });
+
+          if (!rows.length) {
+            return (
+              React.createElement('div', { className: 'card bg-white p-10 text-center text-gray-600' },
+                React.createElement('div', { className: 'text-lg' }, 'No data available for your HOD'),
+                React.createElement('div', { className: 'text-sm text-gray-500 mt-2' }, 
+                  'If you expect to see data here, check the debug panel below.'
+                )
+              )
+            );
+          }
+
+          return (
+            React.createElement('div', { className: 'overflow-x-auto' },
+              React.createElement('table', { className: 'w-full bg-white card overflow-hidden' },
+                React.createElement('thead', { className: 'bg-gradient-to-r from-blue-600 to-cyan-500 text-white' },
+                  React.createElement('tr', null,
+                    headers.map((h, i) =>
+                      React.createElement('th', { key: i, className: 'px-4 py-3 text-left text-sm font-semibold' }, h || `Column ${i+1}`)
+                    )
+                  )
+                ),
+                React.createElement('tbody', null,
+                  rows.map((row, rIdx) =>
+                    React.createElement('tr', {
+                      key: row.id,
+                      className: `border-b border-gray-100 ${rIdx%2===0 ? 'bg-gray-50' : 'bg-white'} hover:bg-blue-50`
+                    },
+                      headers.map((h, ci) => {
+                        const isExp = allowMerchantEdit && h && (h === expectedKey);
+                        const isRem = allowMerchantEdit && h && (h === remarksKey);
+
+                        if (isExp || isRem) {
+                          const field = isExp ? 'expectedDate' : 'remarks';
+                          const val = (editable[row.id] && (field in editable[row.id]))
+                            ? editable[row.id][field]
+                            : (row[field] != null ? row[field] : row[h]);
+                          return React.createElement('td', { key: ci, className: 'px-4 py-2 text-sm' },
+                            React.createElement('input', {
+                              type: isExp ? 'date' : 'text',
+                              value: val || '',
+                              disabled: !isEditingEnabled,
+                              onChange: (e) => onEdit(row.id, field, e.target.value),
+                              className: 'w-full px-2 py-1 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100',
+                              placeholder: isExp ? 'Select date' : 'Enter remarks'
+                            })
+                          );
+                        }
+
+                        return React.createElement('td', { key: ci, className: 'px-4 py-2 text-sm text-gray-700' },
+                          String(row[h] != null ? row[h] : '')
+                        );
+                      })
+                    )
+                  )
+                )
+              )
+            )
+          );
+        };
+
+        if (loading) {
+          return React.createElement('div', { className: 'min-h-screen flex items-center justify-center text-blue-700' },
+            React.createElement('div', { className: 'animate-pulse text-xl' }, 'Loading…')
+          );
+        }
+
+        return (
+          React.createElement('div', { className: 'min-h-screen' },
+
+            /* Header */
+            React.createElement('div', { className: 'bg-gradient-to-r from-blue-600 to-cyan-500 text-white' },
+              React.createElement('div', { className: 'container mx-auto px-6 py-5 flex items-center justify-between flex-wrap gap-4' },
+                React.createElement('div', null,
+                  React.createElement('div', { className: 'text-3xl font-bold' }, 'RA Team Dashboard'),
+                  React.createElement('div', { className: 'text-blue-100 text-sm mt-1' },
+                    `${user.name || ''} (${user.email || ''}) | HOD: ${user.hod || 'ALL'} | Role: ${user.role || ''}`
+                  )
+                ),
+                React.createElement('div', { className: 'flex gap-3 flex-wrap' },
+                  React.createElement('button', { onClick: refresh, className: 'btn bg-white text-blue-600 px-4 py-2 font-semibold hover:bg-blue-50 shadow' }, 'Refresh Data'),
+                  React.createElement('button', { onClick: downloadVisible, className: 'btn bg-cyan-600 text-white px-4 py-2 font-semibold hover:bg-cyan-700 shadow' }, 'Download Excel'),
+                  React.createElement('button', { 
+                    onClick: () => setShowDebug(!showDebug), 
+                    className: 'btn bg-yellow-500 text-white px-4 py-2 font-semibold hover:bg-yellow-600 shadow' 
+                  }, showDebug ? 'Hide Debug' : 'Show Debug')
+                )
+              )
+            ),
+
+            /* Notifications */
+            notice && React.createElement('div', {
+              className: `fixed top-20 right-6 z-50 px-4 py-3 rounded-lg shadow-lg ${notice.type === 'success' ? 'bg-green-600' : 'bg-red-500'} text-white`
+            }, notice.message),
+
+            /* Backend error, if any */
+            errorNote && React.createElement('div', { className: 'container mx-auto px-6 mt-4' },
+              React.createElement('div', { className: 'bg-red-100 text-red-800 p-3 rounded-md card' }, `Backend: ${errorNote}`)
+            ),
+
+            /* Info banner */
+            React.createElement('div', { className: 'container mx-auto px-6 py-4' },
+              React.createElement('div', { className: 'bg-blue-100 border-l-4 border-blue-600 p-4 rounded-lg card' },
+                React.createElement('div', { className: 'text-sm text-blue-800 flex gap-6 flex-wrap' },
+                  React.createElement('span', null, `Last Updated: ${lastUpdate || ''}`),
+                  React.createElement('span', null, `Editing Status: ${isEditingEnabled ? 'Enabled (within window)' : 'Disabled'}`)
+                )
+              )
+            ),
+
+            /* DEBUG PANEL - IMPROVED */
+            showDebug && React.createElement('div', { className: 'container mx-auto px-6 py-2' },
+              React.createElement('div', { className: 'bg-yellow-50 border-l-4 border-yellow-500 p-4 rounded-lg card' },
+                React.createElement('div', { className: 'font-semibold mb-2 text-yellow-900 flex items-center gap-2' },
+                  React.createElement('span', null, '🔍 Debug Information'),
+                  React.createElement('span', { className: 'text-xs font-normal' }, '(Check this if data is missing)')
+                ),
+                
+                /* Sheets Found */
+                React.createElement('div', { className: 'mb-3' },
+                  React.createElement('div', { className: 'text-sm font-semibold text-yellow-800 mb-1' }, 'Sheets Detected:'),
+                  React.createElement('div', { className: 'flex flex-wrap gap-2' },
+                    ['Management View','Merchant_wise_Final','Billed Detailed','Unbilled Detailed'].map((k, i) =>
+                      React.createElement('span', { 
+                        key: i, 
+                        className: `chip ${(meta.sheetsFound && meta.sheetsFound[k] && meta.sheetsFound[k] !== 'NOT FOUND') ? 'bg-green-100 border border-green-300' : 'bg-red-100 border border-red-300'}` 
+                      },
+                        `${k}: ${ (meta.sheetsFound && meta.sheetsFound[k]) ? meta.sheetsFound[k] : 'NOT FOUND' }`
+                      )
+                    )
+                  )
+                ),
+
+                /* Data Counts */
+                meta.debug && React.createElement('div', { className: 'mb-3' },
+                  React.createElement('div', { className: 'text-sm font-semibold text-yellow-800 mb-1' }, 'Data Row Counts (Total in Sheet → Filtered for You):'),
+                  React.createElement('div', { className: 'grid grid-cols-2 md:grid-cols-4 gap-2 text-sm' },
+                    [
+                      { label: 'Management', key: 'management' },
+                      { label: 'Merchant', key: 'merchant' },
+                      { label: 'Billed', key: 'billed' },
+                      { label: 'Unbilled', key: 'unbilled' }
+                    ].map(({ label, key }) =>
+                      React.createElement('div', { key: key, className: 'chip bg-white border border-yellow-300' },
+                        `${label}: ${meta.debug[key]?.total || 0} → ${meta.debug[key]?.filtered || 0}`
+                      )
+                    )
+                  )
+                ),
+
+                /* HOD Info */
+                meta.debug && React.createElement('div', { className: 'mb-3' },
+                  React.createElement('div', { className: 'text-sm font-semibold text-yellow-800 mb-1' }, 'Your HOD Filter:'),
+                  React.createElement('div', { className: 'text-sm chip bg-white border border-yellow-300 inline-block' },
+                    `User HOD: "${meta.debug.userHod || ''}" | Role: ${meta.debug.userRole || ''}`
+                  )
+                ),
+
+                /* HOD Columns Found */
+                React.createElement('div', null,
+                  React.createElement('div', { className: 'text-sm font-semibold text-yellow-800 mb-1' }, 'HOD Columns Detected:'),
+                  React.createElement('div', { className: 'flex flex-wrap gap-2 text-sm' },
+                    Object.entries(meta.hodHeaders || {}).map(([key, val]) =>
+                      React.createElement('span', { 
+                        key: key, 
+                        className: `chip ${val ? 'bg-green-100 border border-green-300' : 'bg-red-100 border border-red-300'}` 
+                      },
+                        `${key}: ${val || 'NOT FOUND'}`
+                      )
+                    )
+                  )
+                ),
+
+                /* Action Items */
+                React.createElement('div', { className: 'mt-3 text-xs text-yellow-700 bg-yellow-100 p-2 rounded' },
+                  React.createElement('div', { className: 'font-semibold mb-1' }, '💡 Troubleshooting:'),
+                  React.createElement('ul', { className: 'list-disc list-inside space-y-1' },
+                    React.createElement('li', null, 'If sheets show "NOT FOUND", check sheet names in your Google Sheet'),
+                    React.createElement('li', null, 'If Total rows is 0, check that sheets have data below the header row'),
+                    React.createElement('li', null, 'If Filtered count is 0 but Total > 0, your HOD filter may be too restrictive'),
+                    React.createElement('li', null, 'If HOD column is "NOT FOUND", the system will show all data to Admins only'),
+                    React.createElement('li', null, 'Empty HOD values in data rows are now visible to all users (improved filtering)')
+                  )
+                )
+              )
+            ),
+
+            /* Tabs */
+            React.createElement('div', { className: 'container mx-auto px-6 py-2' },
+              React.createElement('div', { className: 'bg-white card p-1 inline-flex gap-2 flex-wrap' },
+                [
+                  { key: 'management',  label: 'Management View' },
+                  { key: 'merchantWise',label: 'Merchant Wise' },
+                  { key: 'billed',      label: 'Billed Details' },
+                  { key: 'unbilled',    label: 'Unbilled Details' }
+                ].map(tab =>
+                  React.createElement('button', {
+                    key: tab.key,
+                    onClick: () => setActiveTab(tab.key),
+                    className: `px-6 py-2 font-semibold btn ${activeTab === tab.key ? 'bg-gradient-to-r from-blue-600 to-cyan-500 text-white shadow' : 'text-gray-700 hover:bg-gray-100'}`
+                  }, tab.label)
+                )
+              )
+            ),
+
+            /* Content */
+            React.createElement('div', { className: 'container mx-auto px-6 py-6' },
+              React.createElement('div', { className: 'bg-white card p-6' },
+                activeTab === 'management'   && renderTable('management', false),
+                activeTab === 'merchantWise' && React.createElement(Fragment, null,
+                  renderTable('merchantWise', true),
+                  Object.keys(editable).length > 0 && React.createElement('div', { className: 'mt-4 flex justify-end' },
+                    React.createElement('button', { onClick: saveEdits, className: 'btn bg-gradient-to-r from-blue-600 to-cyan-500 text-white px-6 py-2 font-semibold hover:shadow-lg' }, 'Save Changes')
+                  )
+                ),
+                activeTab === 'billed'       && renderTable('billed', false),
+                activeTab === 'unbilled'     && renderTable('unbilled', false)
+              )
+            ),
+
+            /* Footer */
+            React.createElement('div', { className: 'container mx-auto px-6 py-6 text-center text-gray-600 text-sm' },
+              React.createElement('p', null, `© ${new Date().getFullYear()} RA Team Dashboard | Showing data for ${user.hod || 'ALL'}`)
+            )
+          )
+        );
+      }
+
+      ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(RADashboard));
+    </script>
+  </body>
+</html>
